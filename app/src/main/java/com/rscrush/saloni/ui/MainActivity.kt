@@ -33,7 +33,7 @@ class MainActivity : ComponentActivity() {
 
                         Button(onClick = {
                             val intent = Intent(Intent.ACTION_SENDTO).apply {
-                                data = Uri.parse("smsto:77719 98558")
+                                data = Uri.parse("smsto:9876543210")
                                 putExtra("sms_body", "Hi Saloni ❤")
                             }
                             startActivity(intent)

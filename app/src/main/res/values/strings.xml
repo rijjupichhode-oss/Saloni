@@ -1,1 +1,4 @@
-
+<resources>
+<string name="app_name">Saloni</string>
+<string name="accessibility_service_description">Saloni Accessibility Service</string>
+</resources>

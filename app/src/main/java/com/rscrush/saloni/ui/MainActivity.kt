@@ -24,6 +24,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
@@ -33,6 +34,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.*
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -163,6 +165,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         try {
             val hindi = engine.voices?.filter { it.locale.language == "hi" } ?: return
             if (hindi.isEmpty()) return
+            val saved = prefs.getString("voice_name", null)
+            val savedVoice = hindi.firstOrNull { it.name == saved }
+            if (savedVoice != null) { engine.voice = savedVoice; return }
             fun score(name: String): Int {
                 val n = name.lowercase(Locale.ROOT)
                 var s = 0
@@ -176,6 +181,36 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             val best = hindi.maxByOrNull { score(it.name) } ?: return
             if (score(best.name) > -10) engine.voice = best
         } catch (_: Exception) {
+        }
+    }
+
+    // VOICE TEST dabane par agli Hindi voice bolti hai; pasand aane par rok do, wahi yaad rahegi
+    private fun cycleVoice() {
+        val engine = tts
+        if (engine == null || !ttsReady) {
+            Toast.makeText(this, "Voice engine abhi ready nahi hai", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            val hindi = engine.voices?.filter { it.locale.language == "hi" }?.sortedBy { it.name }
+                ?: emptyList()
+            if (hindi.isEmpty()) {
+                reply("Trader Rijju, is phone me Hindi voice nahi mili. Google TTS settings me Hindi voice data download karo")
+                return
+            }
+            val cur = engine.voice?.name
+            val idx = hindi.indexOfFirst { it.name == cur }
+            val next = hindi[(idx + 1) % hindi.size]
+            engine.voice = next
+            prefs.edit().putString("voice_name", next.name).apply()
+            Toast.makeText(
+                this, "Voice ${hindi.indexOf(next) + 1}/${hindi.size}: ${next.name}", Toast.LENGTH_SHORT
+            ).show()
+            val msg = "Hello Trader Rijju, main Crush hu. Meri ye aawaj kaisi lag rahi hai?"
+            addChat(false, msg)
+            speakGoogle(msg)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Voice badal nahi paayi", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -398,16 +433,26 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         val tokens = input.trim().split(Regex("\\s+"))
         val idx = tokens.indexOfFirst { it.lowercase(Locale.ROOT) in koWords }
         if (idx > 0) {
-            val cand = tokens[idx - 1]
-            val bad = setOf("tumne", "तुमने", "kis", "किस", "aapne", "आपने", "maine", "मैंने")
-            if (cand.lowercase(Locale.ROOT) !in bad) return cap(cand)
+            val bad = setOf(
+                "tumne", "तुमने", "kis", "किस", "aapne", "आपने", "maine", "मैंने",
+                "kya", "क्या", "aap", "आप", "tum", "तुम", "sms", "whatsapp", "instagram",
+                "call", "karo", "kar", "पर", "par", "pe", "पे"
+            )
+            val parts = ArrayList<String>()
+            var j = idx - 1
+            while (j >= 0 && parts.size < 2) {
+                if (tokens[j].lowercase(Locale.ROOT) in bad) break
+                parts.add(0, tokens[j])
+                j--
+            }
+            if (parts.isNotEmpty()) return parts.joinToString(" ") { cap(it) }
         }
         return "Sumit"
     }
 
     private val noiseWords = setOf(
         "bhejo", "bhej", "bhejna", "karo", "kar", "do", "de", "dena", "send", "sms",
-        "whatsapp", "instagram", "message", "ko",
+        "whatsapp", "instagram", "message", "ko", "par", "pe", "open", "पर", "पे", "ओपन",
         "भेजो", "भेज", "करो", "कर", "दो", "दे", "एसएमएस", "मैसेज", "मेसेज",
         "व्हाट्सएप", "व्हाट्सऐप", "वाट्सएप", "व्हाट्सअप", "इंस्टाग्राम", "को"
     )
@@ -553,7 +598,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         val isWa = has(t, "whatsapp", "whats app", "व्हाट्सएप", "व्हाट्सऐप", "वाट्सएप", "व्हाट्सअप", "व्हॉट्सएप", "वॉट्सएप")
         val isInsta = has(t, "instagram", "इंस्टाग्राम")
         val isSms = !isWa && !isInsta && has(t, "sms", "एसएमएस", "एस एम एस", "message", "मैसेज", "मेसेज")
-        val isCall = !isWa && !isInsta && !isSms && has(t, "call", "कॉल", "फोन", "फ़ोन", "phone")
+        val hasKo = words.any { it in koWords }
+        val isCall = !isWa && !isInsta && !isSms &&
+            (has(t, "call", "कॉल") || (hasKo && has(t, "फोन", "फ़ोन", "phone")))
 
         // MEMORY questions
         val asksWho = has(t, "kisko", "kis ko", "किसको", "किस को")
@@ -617,6 +664,14 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
 
         // WhatsApp / Instagram / SMS / Call
+        if (isWa && !hasKo) {
+            // Sirf "WhatsApp kholo" - message nahi bhejna, bas app kholni hai
+            val launch = packageManager.getLaunchIntentForPackage("com.whatsapp")
+            val ok = if (launch != null) safeStart(launch)
+            else safeStart(Intent(Intent.ACTION_VIEW, Uri.parse("https://wa.me/")))
+            reply(if (ok) "Thik hai Trader Rijju, WhatsApp khol rahi hu" else "Trader Rijju, WhatsApp nahi khul paya")
+            return
+        }
         if (isWa) { doWhatsApp(extractName(raw), extractMsg(raw)); return }
         if (isInsta) { doInstagram(extractName(raw), extractMsg(raw)); return }
         if (isSms) { doSms(extractName(raw), extractMsg(raw)); return }
@@ -686,6 +741,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         // Emotional + greetings
         val talk = listOf(
+            listOf("kya kya kar sak", "kya-kya kar sak", "क्या क्या कर सक", "क्या-क्या कर सक", "क्या कर सकती", "kya kar sakti") to
+                "Trader Rijju, main Call, SMS, WhatsApp, Instagram, Light, Gana, YouTube, Mausam, Date aur Time sab kar sakti hu. Aur aapse pyaar se baat bhi",
             listOf("tumhara naam", "tera naam", "aapka naam", "तुम्हारा नाम", "तेरा नाम", "आपका नाम") to
                 "Mera naam Crush hai Trader Rijju, bas aapki Crush",
             listOf("mera naam", "मेरा नाम") to
@@ -745,15 +802,57 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             )
             Spacer(Modifier.height(10.dp))
 
-            Box(
-                modifier = Modifier
-                    .size(120.dp)
-                    .border(if (isActive.value) 4.dp else 2.dp, Green, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Mono("💖", size = 34.sp)
-                    Mono("CRUSH", size = 20.sp, bold = true)
+            // Animation: dil dhadakta hai (active me tez), aur active me ring bahar failti hai
+            val inf = rememberInfiniteTransition(label = "crush")
+            val active = isActive.value
+            val beat by inf.animateFloat(
+                initialValue = 1f,
+                targetValue = if (active) 1.28f else 1.08f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(if (active) 450 else 1100),
+                    repeatMode = RepeatMode.Reverse
+                ),
+                label = "beat"
+            )
+            val ripple by inf.animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(1400),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "ripple"
+            )
+            Box(modifier = Modifier.size(156.dp), contentAlignment = Alignment.Center) {
+                if (active) {
+                    Box(
+                        modifier = Modifier
+                            .size(120.dp)
+                            .graphicsLayer {
+                                scaleX = 1f + 0.3f * ripple
+                                scaleY = 1f + 0.3f * ripple
+                                alpha = 0.7f * (1f - ripple)
+                            }
+                            .border(3.dp, Green, CircleShape)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(120.dp)
+                        .border(if (active) 4.dp else 2.dp, Green, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Box(
+                            modifier = Modifier.graphicsLayer {
+                                scaleX = beat
+                                scaleY = beat
+                            }
+                        ) {
+                            Mono("💖", size = 34.sp)
+                        }
+                        Mono("CRUSH", size = 20.sp, bold = true)
+                    }
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -790,12 +889,15 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 HackerButton("LIGHT", Modifier.weight(1f), filled = false) { doLight(null) }
                 HackerButton("VOICE TEST", Modifier.weight(1f), filled = false) {
-                    val msg = "Hello Trader Rijju, main Crush hu. Meri aawaj kaisi lag rahi hai?"
-                    addChat(false, msg)
                     if (!voiceOn.value) {
                         Toast.makeText(this@MainActivity, "Voice switch OFF hai", Toast.LENGTH_SHORT).show()
+                    } else if (ELEVEN_API_KEY.isBlank()) {
+                        cycleVoice()
+                    } else {
+                        val msg = "Hello Trader Rijju, main Crush hu. Meri aawaj kaisi lag rahi hai?"
+                        addChat(false, msg)
+                        speak(msg)
                     }
-                    speak(msg)
                 }
             }
             Spacer(Modifier.height(10.dp))
@@ -891,5 +993,3 @@ private fun HackerSwitch(label: String, checked: Boolean, onChange: (Boolean) ->
         }
     }
 }
-
-

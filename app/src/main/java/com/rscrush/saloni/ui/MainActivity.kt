@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.media.MediaPlayer
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -40,6 +41,10 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -48,6 +53,13 @@ import java.util.Locale
 private val Green = Color(0xFF00FF00)
 private val DimGreen = Color(0xFF00AA00)
 private val DarkGreen = Color(0xFF006600)
+
+// ---------- ElevenLabs voice ----------
+// Apni ElevenLabs API Key yaha quotes ke andar paste karo.
+// Key khali ("") rahi to app apne aap Google TTS use karegi.
+private const val ELEVEN_API_KEY = ""
+private const val ELEVEN_VOICE_ID = "7PoJrtDD6yvTa56HTDt1"
+private const val ELEVEN_MODEL = "eleven_multilingual_v2"
 
 private data class ChatLine(val fromUser: Boolean, val text: String)
 
@@ -68,6 +80,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var recognizer: SpeechRecognizer? = null
     private var torchOn = false
     private var pending: (() -> Unit)? = null
+    private var player: MediaPlayer? = null
+    @Volatile private var speakToken = 0
 
     private val prefs by lazy { getSharedPreferences("crush_memory", Context.MODE_PRIVATE) }
 
@@ -110,6 +124,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         handler.removeCallbacksAndMessages(null)
         try { recognizer?.destroy() } catch (_: Exception) {}
         try { tts?.stop(); tts?.shutdown() } catch (_: Exception) {}
+        try { player?.release() } catch (_: Exception) {}
         super.onDestroy()
     }
 
@@ -172,12 +187,80 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun speak(text: String) {
-        if (!voiceOn.value || !ttsReady) return
+        if (!voiceOn.value) return
+        speakToken++
+        try { player?.release() } catch (_: Exception) {}
+        player = null
+        if (ELEVEN_API_KEY.isNotBlank()) speakEleven(text) else speakGoogle(text)
+    }
+
+    private fun speakGoogle(text: String) {
+        if (!ttsReady) { isSpeaking = false; return }
         val engine = tts ?: return
         isSpeaking = true
         try { recognizer?.cancel() } catch (_: Exception) {}
         val r = engine.speak(text, TextToSpeech.QUEUE_FLUSH, Bundle(), "crush_utt")
         if (r == TextToSpeech.ERROR) isSpeaking = false
+    }
+
+    private fun speakEleven(text: String) {
+        isSpeaking = true
+        try { recognizer?.cancel() } catch (_: Exception) {}
+        try { tts?.stop() } catch (_: Exception) {}
+        val token = speakToken
+        Thread {
+            var file: File? = null
+            try {
+                val url = URL("https://api.elevenlabs.io/v1/text-to-speech/$ELEVEN_VOICE_ID?output_format=mp3_44100_128")
+                val conn = url.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 10000
+                conn.readTimeout = 30000
+                conn.doOutput = true
+                conn.setRequestProperty("xi-api-key", ELEVEN_API_KEY)
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("Accept", "audio/mpeg")
+                val body = JSONObject().put("text", text).put("model_id", ELEVEN_MODEL).toString()
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                if (conn.responseCode == 200) {
+                    val f = File(cacheDir, "crush_tts_${System.nanoTime()}.mp3")
+                    conn.inputStream.use { input -> f.outputStream().use { input.copyTo(it) } }
+                    file = f
+                }
+                conn.disconnect()
+            } catch (e: Exception) {
+                file = null
+            }
+            val result: File? = file
+            handler.post {
+                val file: File? = result
+                if (token != speakToken) { file?.delete(); return@post } // nayi baat aa chuki hai
+                if (file == null) { speakGoogle(text); return@post }       // fallback: Google TTS
+                try {
+                    val mp = MediaPlayer()
+                    player = mp
+                    mp.setDataSource(file.absolutePath)
+                    mp.setOnCompletionListener { m ->
+                        try { m.release() } catch (_: Exception) {}
+                        if (player === m) player = null
+                        file.delete()
+                        speechFinished()
+                    }
+                    mp.setOnErrorListener { m, _, _ ->
+                        try { m.release() } catch (_: Exception) {}
+                        if (player === m) player = null
+                        file.delete()
+                        speechFinished()
+                        true
+                    }
+                    mp.setOnPreparedListener { it.start() }
+                    mp.prepareAsync()
+                } catch (e: Exception) {
+                    file.delete()
+                    speakGoogle(text)
+                }
+            }
+        }.start()
     }
 
     private fun addChat(fromUser: Boolean, text: String) {
@@ -808,3 +891,5 @@ private fun HackerSwitch(label: String, checked: Boolean, onChange: (Boolean) ->
         }
     }
 }
+
+

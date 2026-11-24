@@ -84,7 +84,7 @@ class MainActivity : ComponentActivity() {
         setContent { EagleScreen(eagle) }
     }
 
-    override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
+    override fun onRequestPermissionsResult(code: Int, perms: Array<String>, res: IntArray) {
         super.onRequestPermissionsResult(code, perms, res)
         if (code == 1 && res.isNotEmpty() && res[0] == PackageManager.PERMISSION_GRANTED) eagle.listen()
     }
@@ -418,3 +418,4 @@ fun EagleScreen(e: EagleBrain) {
         }
     }
 }
+           

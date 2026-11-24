@@ -279,8 +279,8 @@ class EagleBrain(private val act: ComponentActivity) {
             // Time / date / battery
             has(t, "time", "samay", "kitne baje", "baj gaye") -> {
                 val c = Calendar.getInstance()
-                return String.format(Locale.US, "Abhi %d:%02d ho rahe hain.", c.get(Calendar.HOUR), c.get(Calendar.MINUTE))
-                    .replace("0:", "12:")
+                val h = if (c.get(Calendar.HOUR) == 0) 12 else c.get(Calendar.HOUR)
+                return String.format(Locale.US, "Abhi %d:%02d ho rahe hain.", h, c.get(Calendar.MINUTE))
             }
             has(t, "date", "tarikh", "tareekh", "aaj kya din", "aaj ki date") -> {
                 val c = Calendar.getInstance()
@@ -296,7 +296,7 @@ class EagleBrain(private val act: ComponentActivity) {
                 return if (googleSearch(q)) "$q search kar raha hoon." else "Search nahi ho paaya."
             }
             // Chit-chat
-            has(t, "hello", "hi", "hey", "namaste", "salam") -> { mood = "Happy 😊"; return "Hello $userName! Bolo, kya karna hai?" }
+            t.split(" ").any { it in listOf("hi", "hello", "hey", "namaste", "salam") } -> { mood = "Happy 😊"; return "Hello $userName! Bolo, kya karna hai?" }
             has(t, "kaise ho", "kaisa hai", "how are you", "kya haal") -> { mood = "Happy 😊"; return "Main bilkul mast hoon $userName, tum batao?" }
             has(t, "tera naam", "tumhara naam", "your name", "kaun ho", "who are you") -> { mood = "Chill 😎"; return "Main Eagle hoon, tumhara apna AI assistant. Aasman se bhi upar ki nazar!" }
             has(t, "thank", "shukriya", "dhanyavaad", "thanks") -> { mood = "Warm 🥰"; return "Arre koi baat nahi $userName, main hoon na." }

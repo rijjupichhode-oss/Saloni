@@ -268,6 +268,8 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         if (r == TextToSpeech.ERROR) isSpeaking = false
     }
 
+    private var lastVoiceErr = ""
+
     private fun speakEleven(text: String) {
         isSpeaking = true
         try { recognizer?.cancel() } catch (_: Exception) {}
@@ -275,6 +277,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         val token = speakToken
         Thread {
             var file: File? = null
+            var err = ""
             try {
                 val url = URL("https://api.elevenlabs.io/v1/text-to-speech/$ELEVEN_VOICE_ID?output_format=mp3_44100_128")
                 val conn = url.openConnection() as HttpURLConnection
@@ -287,20 +290,47 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 conn.setRequestProperty("Accept", "audio/mpeg")
                 val body = JSONObject().put("text", text).put("model_id", ELEVEN_MODEL).toString()
                 conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-                if (conn.responseCode == 200) {
+                val code = conn.responseCode
+                if (code == 200) {
                     val f = File(cacheDir, "crush_tts_${System.nanoTime()}.mp3")
                     conn.inputStream.use { input -> f.outputStream().use { input.copyTo(it) } }
                     file = f
+                } else {
+                    val errBody = try {
+                        conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    } catch (_: Exception) { "" }
+                    val why = when (code) {
+                        401 -> "key galat hai, ya key me Text to Speech permission OFF hai"
+                        402 -> "free plan me ye voice API se nahi chalti (voice ko My Voices me add karo, ya plan upgrade karo)"
+                        404 -> "ye Voice ID is account me nahi mili"
+                        429 -> "ElevenLabs ki limit khatam ho gayi"
+                        else -> "error $code"
+                    }
+                    err = "$why | ${errBody.replace("\n", " ").take(110)}"
                 }
                 conn.disconnect()
+            } catch (e: SecurityException) {
+                err = "Manifest me INTERNET permission nahi hai"
+            } catch (e: java.net.UnknownHostException) {
+                err = "phone me internet nahi hai"
             } catch (e: Exception) {
-                file = null
+                err = e.javaClass.simpleName + ": " + (e.message ?: "").take(80)
             }
             val result: File? = file
+            val errFinal = err
             handler.post {
                 val file: File? = result
                 if (token != speakToken) { file?.delete(); return@post } // nayi baat aa chuki hai
-                if (file == null) { speakGoogle(text); return@post }       // fallback: Google TTS
+                if (file == null) {
+                    // Pehli baar ya naya error aaye to chat me dikhao, fir Google voice se bolo
+                    if (errFinal.isNotBlank() && errFinal != lastVoiceErr) {
+                        lastVoiceErr = errFinal
+                        addChat(false, "ElevenLabs voice nahi chali: $errFinal. Abhi Google voice use kar rahi hu")
+                    }
+                    speakGoogle(text)
+                    return@post
+                }
+                lastVoiceErr = ""
                 try {
                     val mp = MediaPlayer()
                     player = mp
@@ -399,8 +429,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
                 putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
                 putExtra(RecognizerIntent.EXTRA_CALLING_PACKAGE, packageName)
+                // Poori baat khatam hone tak ruke, beech me na kate
+                putExtra("android.speech.extra.SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS", 1800L)
+                putExtra("android.speech.extra.SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS", 1500L)
+                putExtra("android.speech.extra.SPEECH_INPUT_MINIMUM_LENGTH_MILLIS", 1500L)
             }
             recognizer?.startListening(i)
         } catch (e: Exception) {
@@ -442,18 +476,85 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // Hindi naam (Devanagari) aur English naam (Latin) ko ek jaisi "sound" me badalta hai
+    private val devaMap: Map<Char, String> = mapOf(
+        'क' to "k", 'ख' to "k", 'ग' to "g", 'घ' to "g", 'ङ' to "n",
+        'च' to "C", 'छ' to "C", 'ज' to "j", 'झ' to "j", 'ञ' to "n",
+        'ट' to "t", 'ठ' to "t", 'ड' to "d", 'ढ' to "d", 'ण' to "n",
+        'त' to "t", 'थ' to "t", 'द' to "d", 'ध' to "d", 'न' to "n",
+        'प' to "p", 'फ' to "f", 'ब' to "b", 'भ' to "b", 'म' to "m",
+        'र' to "r", 'ल' to "l", 'ळ' to "l", 'व' to "v", 'श' to "s", 'ष' to "s", 'स' to "s",
+        'ं' to "n", 'ँ' to "n"
+    )
+
+    private fun skeleton(src: String): String {
+        val sb = StringBuilder()
+        for (ch in src.lowercase(Locale.ROOT)) {
+            val m = devaMap[ch]
+            if (m != null) sb.append(m)
+            else if (ch in 'a'..'z') sb.append(ch)
+        }
+        var x = sb.toString()
+        x = x.replace("chh", "C").replace("ch", "C").replace("sh", "s").replace("bh", "b")
+            .replace("kh", "k").replace("gh", "g").replace("jh", "j").replace("th", "t")
+            .replace("dh", "d").replace("ph", "f").replace("ck", "k")
+            .replace("x", "ks").replace('c', 'k').replace('q', 'k').replace('w', 'v').replace('z', 'j')
+        val out = StringBuilder()
+        for (ch in x) {
+            if (ch in "aeiouyh") continue
+            if (out.isNotEmpty() && out.last() == ch) continue
+            out.append(ch)
+        }
+        return out.toString()
+    }
+
     private fun getNumberByName(name: String): String? {
         if (!hasPerm(Manifest.permission.READ_CONTACTS)) return null
-        return try {
-            contentResolver.query(
+        try {
+            // 1) seedha naam se dhundo
+            val direct = contentResolver.query(
                 ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
                 arrayOf(ContactsContract.CommonDataKinds.Phone.NUMBER),
                 "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
                 arrayOf("%$name%"),
                 null
             )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            if (direct != null) return direct
+
+            // 2) Hindi me bola gaya naam, English me saved contact se sound se milao
+            val want = skeleton(name)
+            if (want.length < 2) return null
+            var best: String? = null
+            var bestScore = 0
+            contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                arrayOf(
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                    ContactsContract.CommonDataKinds.Phone.NUMBER
+                ),
+                null, null, null
+            )?.use { c ->
+                var n = 0
+                while (c.moveToNext() && n < 6000) {
+                    n++
+                    val dn = c.getString(0) ?: continue
+                    val have = skeleton(dn)
+                    if (have.isEmpty()) continue
+                    val score = when {
+                        have == want -> 100
+                        have.startsWith(want) -> 80
+                        want.length >= 3 && have.contains(want) -> 70
+                        else -> 0
+                    }
+                    if (score > bestScore) {
+                        bestScore = score
+                        best = c.getString(1)
+                    }
+                }
+            }
+            return best
         } catch (e: Exception) {
-            null
+            return null
         }
     }
 
@@ -466,7 +567,10 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             val bad = setOf(
                 "tumne", "तुमने", "kis", "किस", "aapne", "आपने", "maine", "मैंने",
                 "kya", "क्या", "aap", "आप", "tum", "तुम", "sms", "whatsapp", "instagram",
-                "call", "karo", "kar", "पर", "par", "pe", "पे"
+                "call", "karo", "kar", "पर", "par", "pe", "पे",
+                "करके", "karke", "ओपन", "open", "खोलो", "kholo", "khol", "खोल", "सेंड", "send",
+                "करो", "फिर", "phir", "एसएमएस", "मैसेज", "मेसेज", "message",
+                "व्हाट्सएप", "व्हाट्सऐप", "इंस्टाग्राम"
             )
             val parts = ArrayList<String>()
             var j = idx - 1
@@ -477,14 +581,20 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             }
             if (parts.isNotEmpty()) return parts.joinToString(" ") { cap(it) }
         }
-        return "Sumit"
+        return ""
+    }
+
+    private fun askName() {
+        reply("Trader Rijju, kisko? Naam ke saath bolo, jaise: Raj Bhai ko SMS karo Hello")
     }
 
     private val noiseWords = setOf(
         "bhejo", "bhej", "bhejna", "karo", "kar", "do", "de", "dena", "send", "sms",
         "whatsapp", "instagram", "message", "ko", "par", "pe", "open", "पर", "पे", "ओपन",
         "भेजो", "भेज", "करो", "कर", "दो", "दे", "एसएमएस", "मैसेज", "मेसेज",
-        "व्हाट्सएप", "व्हाट्सऐप", "वाट्सएप", "व्हाट्सअप", "इंस्टाग्राम", "को"
+        "व्हाट्सएप", "व्हाट्सऐप", "वाट्सएप", "व्हाट्सअप", "इंस्टाग्राम", "को",
+        "सेंड", "सेन्ड", "लिखकर", "लिखके", "लिखो", "लिख", "likh", "likhkar", "likhke",
+        "करके", "karke", "भेजें", "भेजिए", "bhejiye", "बोलो", "bolo", "खोलो", "kholo"
     )
 
     private fun extractMsg(input: String): String {
@@ -525,6 +635,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private fun doSms(name: String, msg: String) {
         if (blockedBySwitch()) return
+        if (name.isBlank()) { askName(); return }
         val num = getNumberByName(name)
         prefs.edit().putString("last_sms_name", name).putString("last_sms_msg", msg).apply()
         // Number mila + message likha hai + permission hai -> seedha SMS bhej do
@@ -544,6 +655,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private fun doWhatsApp(name: String, msg: String) {
         if (blockedBySwitch()) return
+        if (name.isBlank()) { askName(); return }
         val num = getNumberByName(name)
         var digits = num?.filter { it.isDigit() } ?: ""
         if (digits.length == 10) digits = "91$digits"
@@ -567,6 +679,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
     private fun doCall(name: String) {
         if (blockedBySwitch()) return
+        if (name.isBlank()) { askName(); return }
         val num = getNumberByName(name)
         val direct = num != null && hasPerm(Manifest.permission.CALL_PHONE)
         val i = Intent(
@@ -583,6 +696,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun doInstagram(name: String, msg: String) {
+        if (name.isBlank()) { askName(); return }
         try {
             val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             cm.setPrimaryClip(ClipData.newPlainText("crush_msg", msg))
@@ -1085,6 +1199,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
         if (asksMemory && (isWa || isSms || isCall)) {
             val name = extractName(raw)
+            if (name.isBlank()) { askName(); return }
             when {
                 isSms -> {
                     val sn = prefs.getString("last_sms_name", "") ?: ""
@@ -1121,7 +1236,9 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
         // Reminder / travel
         if (has(t, "yaad dilao", "yaad dila", "याद दिलाओ", "याद दिला")) {
-            reply("Thik hai Trader Rijju, ${extractName(raw)} ko yaad dilane wali baat maine note kar li hai")
+            val who = extractName(raw)
+            if (who.isBlank()) reply("Trader Rijju, kya yaad dilau? Aise bolo: 10 minute baad yaad dilao")
+            else reply("Thik hai Trader Rijju, $who ko yaad dilane wali baat maine note kar li hai")
             return
         }
         if (has(t, "baroda", "बड़ौदा", "बरोदा", "वडोदरा", "vadodara")) {
